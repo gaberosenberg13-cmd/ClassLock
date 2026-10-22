@@ -1,0 +1,6 @@
+{
+  "name": "ClassLock - Interactive Classroom Presentations & Lockdown",
+  "description": "Engaging classroom presentation platform with real-time slide sync, live questions, interactive educational games, and browser-based focus mode.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
