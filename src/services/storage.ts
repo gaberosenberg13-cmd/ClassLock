@@ -537,13 +537,14 @@ class SessionStore {
     }
   }
 
-  private notifyListeners(session: LiveSession) {
+  private notifyListeners(session: LiveSession, role: 'teacher' | 'student' = 'teacher') {
     this.listeners.forEach(fn => fn(session));
     if (broadcastChannel) {
       try {
         broadcastChannel.postMessage({
           type: 'SESSION_UPDATE',
           session,
+          role,
         });
       } catch (err) {
         // ignore clone error if any
@@ -556,7 +557,17 @@ class SessionStore {
       fetch(`/api/sessions/${session.joinCode}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session, presentation: pres }),
+        body: JSON.stringify({ session, presentation: pres, role }),
+      }).catch(() => {});
+    }
+  }
+
+  public broadcastLaser(joinCode: string, laser: { x: number; y: number; visible: boolean }) {
+    if (typeof window !== 'undefined' && joinCode) {
+      fetch(`/api/sessions/${joinCode.toUpperCase()}/laser`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ laser }),
       }).catch(() => {});
     }
   }
@@ -720,7 +731,7 @@ class SessionStore {
     this.sessions.set(session.id, session);
     this.sessions.set(session.joinCode, session);
     this.saveToStorage();
-    this.notifyListeners(session);
+    this.notifyListeners(session, 'student');
 
     return { session, studentId };
   }
@@ -825,7 +836,7 @@ class SessionStore {
 
     student.lastActive = new Date().toISOString();
     this.saveToStorage();
-    this.notifyListeners(session);
+    this.notifyListeners(session, 'student');
     return response;
   }
 
@@ -863,7 +874,7 @@ class SessionStore {
     student.isLockedOut = status.isLockedOut;
 
     this.saveToStorage();
-    this.notifyListeners(session);
+    this.notifyListeners(session, 'student');
     return violation;
   }
 
@@ -908,12 +919,13 @@ class SessionStore {
     this.notifyListeners(session);
   }
 
-  public launchGame(sessionId: string, gameId: 'quiz_race' | 'memory_match', gameData?: any) {
+  public launchGame(sessionId: string, gameId: 'quiz_race' | 'memory_match' | 'kahoot_trivia', gameData?: any) {
     const session = this.getSession(sessionId);
     if (!session) return;
     const gameTitles: Record<string, string> = {
       quiz_race: 'Quiz Race Arena',
       memory_match: 'Vocabulary Memory Match',
+      kahoot_trivia: 'ClassLock Kahoot Live Quiz',
     };
     session.activeGame = {
       gameId,
@@ -971,7 +983,7 @@ class SessionStore {
     session.reactions = session.reactions.filter(r => r.timestamp > cutoff);
 
     this.saveToStorage();
-    this.notifyListeners(session);
+    this.notifyListeners(session, 'student');
   }
 
   public submitStudentQuestion(
@@ -995,7 +1007,7 @@ class SessionStore {
 
     session.studentQuestions.unshift(item);
     this.saveToStorage();
-    this.notifyListeners(session);
+    this.notifyListeners(session, 'student');
   }
 
   public markQuestionAnswered(sessionId: string, questionId: string) {

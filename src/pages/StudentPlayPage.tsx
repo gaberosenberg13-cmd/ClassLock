@@ -30,7 +30,9 @@ import { sessionStore } from '../services/storage.ts';
 import { LockdownOverlay } from '../components/LockdownOverlay.tsx';
 import { QuizRaceGame } from '../components/games/QuizRaceGame.tsx';
 import { MemoryMatchGame } from '../components/games/MemoryMatchGame.tsx';
+import { KahootTriviaGame } from '../components/games/KahootTriviaGame.tsx';
 import { playChime, playSuccess, playViolationTone, isSoundEnabled, setSoundEnabled } from '../utils/soundEffects.ts';
+import { getSlideEmbedUrl } from '../services/slideImporter.ts';
 
 interface StudentPlayPageProps {
   joinCode: string;
@@ -66,6 +68,9 @@ export const StudentPlayPage: React.FC<StudentPlayPageProps> = ({
   const [hasSubmittedAnswer, setHasSubmittedAnswer] = useState(false);
   const [remainingTime, setRemainingTime] = useState<number | null>(null);
 
+  // Live Laser Pointer from Teacher
+  const [laserPointer, setLaserPointer] = useState<{ x: number; y: number; visible: boolean } | null>(null);
+
   // Student Reaction & Q&A
   const [lastSentReaction, setLastSentReaction] = useState<string | null>(null);
   const [isAskModalOpen, setIsAskModalOpen] = useState(false);
@@ -73,7 +78,7 @@ export const StudentPlayPage: React.FC<StudentPlayPageProps> = ({
   const [questionSentToast, setQuestionSentToast] = useState(false);
   const [sound, setSound] = useState(isSoundEnabled());
 
-  // Sync session state from sessionStore & SSE stream
+  // Sync session state from sessionStore & SSE stream & Polling Fallback
   useEffect(() => {
     const cleanCode = joinCode.toUpperCase();
     const current = sessionStore.getSession(cleanCode);
@@ -88,6 +93,9 @@ export const StudentPlayPage: React.FC<StudentPlayPageProps> = ({
         if (res?.session) {
           setSession(res.session);
           setPresentation(res.presentation || sessionStore.getPresentationById(res.session.presentationId));
+          if (res.session.laserPointer) {
+            setLaserPointer(res.session.laserPointer);
+          }
         }
         setIsLoadingSession(false);
       });
@@ -98,34 +106,95 @@ export const StudentPlayPage: React.FC<StudentPlayPageProps> = ({
         setSession({ ...updated });
         const pres = sessionStore.getPresentationById(updated.presentationId);
         setPresentation(pres);
+        if (updated.laserPointer) {
+          setLaserPointer(updated.laserPointer);
+        }
         setIsLoadingSession(false);
       }
     });
 
     let eventSource: EventSource | null = null;
-    try {
-      eventSource = new EventSource(`/api/sessions/${cleanCode}/stream`);
-      eventSource.onmessage = (e) => {
-        try {
-          const payload = JSON.parse(e.data);
-          if ((payload.type === 'SESSION_UPDATE' || payload.type === 'CONNECTED') && payload.session) {
-            setSession({ ...payload.session });
-            sessionStore.updateSessionLocally(payload.session);
-            if (payload.presentation) {
-              setPresentation(payload.presentation);
+    const connectSSE = () => {
+      try {
+        if (eventSource) eventSource.close();
+        eventSource = new EventSource(`/api/sessions/${cleanCode}/stream`);
+        eventSource.onmessage = (e) => {
+          try {
+            const payload = JSON.parse(e.data);
+            if (payload.type === 'LASER_MOVE' && payload.laser) {
+              setLaserPointer(payload.laser);
+            } else if ((payload.type === 'SESSION_UPDATE' || payload.type === 'CONNECTED') && payload.session) {
+              setSession({ ...payload.session });
+              sessionStore.updateSessionLocally(payload.session);
+              if (payload.presentation) {
+                setPresentation(payload.presentation);
+              }
+              if (payload.session.laserPointer) {
+                setLaserPointer(payload.session.laserPointer);
+              }
+              setIsLoadingSession(false);
             }
-            setIsLoadingSession(false);
+          } catch (err) {
+            // ignore
           }
-        } catch (err) {
-          // ignore
+        };
+        eventSource.onerror = () => {
+          // Reconnect handled smoothly via polling fallback
+        };
+      } catch (e) {
+        // handled
+      }
+    };
+
+    connectSSE();
+
+    // 1-second background polling fallback to guarantee mobile multi-device sync
+    const pollInterval = setInterval(() => {
+      sessionStore.fetchServerSession(cleanCode).then(res => {
+        if (res?.session) {
+          setSession(prev => {
+            if (
+              !prev ||
+              prev.currentSlideIndex !== res.session.currentSlideIndex ||
+              prev.activeQuestion?.question.id !== res.session.activeQuestion?.question.id ||
+              prev.activeQuestion?.revealed !== res.session.activeQuestion?.revealed ||
+              prev.lockMode !== res.session.lockMode ||
+              prev.isLockPaused !== res.session.isLockPaused ||
+              prev.activeGame?.gameId !== res.session.activeGame?.gameId ||
+              prev.activeGame?.status !== res.session.activeGame?.status
+            ) {
+              return { ...res.session };
+            }
+            return prev;
+          });
+          if (res.presentation) {
+            setPresentation(res.presentation);
+          }
+          if (res.session.laserPointer) {
+            setLaserPointer(res.session.laserPointer);
+          }
+          setIsLoadingSession(false);
         }
-      };
-    } catch (e) {
-      // handled
-    }
+      });
+    }, 1200);
+
+    const handleVisibility = () => {
+      if (!document.hidden) {
+        sessionStore.fetchServerSession(cleanCode).then(res => {
+          if (res?.session) {
+            setSession({ ...res.session });
+            if (res.presentation) setPresentation(res.presentation);
+          }
+        });
+        connectSSE();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
       unsubscribe();
+      clearInterval(pollInterval);
+      document.removeEventListener('visibilitychange', handleVisibility);
       if (eventSource) eventSource.close();
     };
   }, [joinCode]);
@@ -467,6 +536,15 @@ export const StudentPlayPage: React.FC<StudentPlayPageProps> = ({
                   sessionStore.submitResponse(session.id, studentId, { selectedOptionId: optId });
                 }}
               />
+            ) : session.activeGame.gameId === 'kahoot_trivia' ? (
+              <KahootTriviaGame
+                session={session}
+                isTeacher={false}
+                currentStudentId={studentId}
+                onAnswerSubmit={(qId, optId, pts) => {
+                  // submitted internally with speed-adjusted points
+                }}
+              />
             ) : (
               <MemoryMatchGame
                 session={session}
@@ -481,6 +559,22 @@ export const StudentPlayPage: React.FC<StudentPlayPageProps> = ({
         ) : (
           /* Synchronized Slide Viewer */
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-10 shadow-2xl relative overflow-hidden min-h-[420px] flex flex-col justify-between">
+            {/* Live Synchronized Laser Pointer from Teacher */}
+            {laserPointer?.visible && (
+              <div
+                className="absolute z-30 pointer-events-none -translate-x-1/2 -translate-y-1/2 transition-all duration-75 ease-out"
+                style={{
+                  left: `${laserPointer.x * 100}%`,
+                  top: `${laserPointer.y * 100}%`,
+                }}
+              >
+                <div className="relative flex items-center justify-center">
+                  <div className="absolute w-8 h-8 rounded-full bg-red-500/40 animate-ping" />
+                  <div className="w-4 h-4 rounded-full bg-red-500 shadow-[0_0_15px_#ef4444,0_0_30px_#ef4444] border-2 border-white" />
+                </div>
+              </div>
+            )}
+
             <div>
               <div className="flex items-center justify-between text-xs font-mono text-indigo-400 uppercase tracking-widest mb-3">
                 <span>Instructor Sync</span>
@@ -491,28 +585,60 @@ export const StudentPlayPage: React.FC<StudentPlayPageProps> = ({
                 {currentSlide?.title || 'Slide Title'}
               </h2>
 
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
-                <div className={currentSlide?.imageUrl ? 'md:col-span-7' : 'md:col-span-12'}>
-                  <ul className="space-y-4">
-                    {currentSlide?.content.map((bullet, i) => (
-                      <li key={i} className="flex items-start gap-3 text-slate-200 text-base leading-relaxed">
-                        <span className="w-2 h-2 rounded-full bg-indigo-400 mt-2 flex-shrink-0" />
-                        <span>{bullet}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
+              {currentSlide?.embedUrl ? (
+                <div className="space-y-3 mb-2">
+                  <div className="flex items-center justify-between text-xs font-mono text-slate-400 bg-slate-950/80 px-3 py-2 rounded-xl border border-slate-800">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                      <span className="text-slate-300 font-semibold">Synchronized Google Slides</span>
+                      <span className="text-slate-500">· Slide {session.currentSlideIndex + 1}</span>
+                    </div>
+                    {(currentSlide.sourceUrl || currentSlide.embedUrl) && (
+                      <a
+                        href={currentSlide.sourceUrl || currentSlide.embedUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-indigo-400 hover:text-indigo-300 underline text-xs font-sans"
+                      >
+                        Open Fullscreen ↗
+                      </a>
+                    )}
+                  </div>
 
-                {currentSlide?.imageUrl && (
-                  <div className="md:col-span-5 rounded-2xl overflow-hidden border border-slate-800 bg-slate-950">
-                    <img
-                      src={currentSlide.imageUrl}
-                      alt={currentSlide.imageAlt || currentSlide.title}
-                      className="w-full h-56 object-cover"
+                  <div className="relative w-full aspect-video rounded-2xl overflow-hidden border border-slate-800 bg-black shadow-xl">
+                    <iframe
+                      src={getSlideEmbedUrl(currentSlide.embedUrl, session.currentSlideIndex)}
+                      title={currentSlide.title || 'Google Slides Presentation'}
+                      className="w-full h-full border-0"
+                      allowFullScreen
+                      loading="lazy"
                     />
                   </div>
-                )}
-              </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
+                  <div className={currentSlide?.imageUrl ? 'md:col-span-7' : 'md:col-span-12'}>
+                    <ul className="space-y-4">
+                      {currentSlide?.content.map((bullet, i) => (
+                        <li key={i} className="flex items-start gap-3 text-slate-200 text-base leading-relaxed">
+                          <span className="w-2 h-2 rounded-full bg-indigo-400 mt-2 flex-shrink-0" />
+                          <span>{bullet}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  {currentSlide?.imageUrl && (
+                    <div className="md:col-span-5 rounded-2xl overflow-hidden border border-slate-800 bg-slate-950">
+                      <img
+                        src={currentSlide.imageUrl}
+                        alt={currentSlide.imageAlt || currentSlide.title}
+                        className="w-full h-56 object-cover"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="mt-8 pt-4 border-t border-slate-800 flex items-center justify-between text-xs text-slate-500">
@@ -642,9 +768,13 @@ export const StudentPlayPage: React.FC<StudentPlayPageProps> = ({
         >
           <div className="relative w-full max-w-xl bg-slate-900 border-2 border-indigo-500 rounded-3xl p-6 sm:p-8 shadow-2xl text-white">
             <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2 text-indigo-400 text-xs font-bold uppercase tracking-wider">
-                <HelpCircle className="w-4 h-4" />
-                <span>Live Checkpoint</span>
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider">
+                <HelpCircle className="w-4 h-4 text-indigo-400" />
+                {activeQuestion.question.type === 'poll' ? (
+                  <span className="text-amber-400">Classroom Pulse Poll · Participation Credit (No Wrong Answer)</span>
+                ) : (
+                  <span className="text-emerald-400">Graded Checkpoint Question · {activeQuestion.question.points} Points</span>
+                )}
               </div>
 
               {remainingTime !== null && (
@@ -664,13 +794,16 @@ export const StudentPlayPage: React.FC<StudentPlayPageProps> = ({
                 <div className="space-y-2.5">
                   {activeQuestion.question.options.map(opt => {
                     const isStudentChoice = selectedOptionId === opt.id;
+                    const isPoll = activeQuestion.question.type === 'poll';
                     const isCorrect = opt.isCorrect;
 
                     let cardClass = 'bg-slate-800/60 border-slate-700 text-slate-300';
-                    if (isCorrect) {
-                      cardClass = 'bg-emerald-950/80 border-emerald-500 text-emerald-200 ring-2 ring-emerald-500/30';
-                    } else if (isStudentChoice && !isCorrect) {
+                    if (!isPoll && isCorrect) {
+                      cardClass = 'bg-emerald-950/80 border-emerald-500 text-emerald-200 ring-2 ring-emerald-500/40';
+                    } else if (!isPoll && isStudentChoice && !isCorrect) {
                       cardClass = 'bg-red-950/80 border-red-500 text-red-200';
+                    } else if (isPoll && isStudentChoice) {
+                      cardClass = 'bg-indigo-950/80 border-indigo-500 text-indigo-200 ring-2 ring-indigo-500/30';
                     }
 
                     return (
@@ -681,20 +814,28 @@ export const StudentPlayPage: React.FC<StudentPlayPageProps> = ({
                         <div className="flex items-center gap-3">
                           <span>{opt.text}</span>
                           {isStudentChoice && (
-                            <span className="text-[10px] bg-slate-700 px-2 py-0.5 rounded text-white uppercase">
-                              Your Answer
+                            <span className="text-[10px] bg-slate-700 px-2 py-0.5 rounded text-white uppercase font-bold tracking-wider">
+                              Your Selection
                             </span>
                           )}
                         </div>
-                        {isCorrect ? (
-                          <span className="text-emerald-400 font-bold flex items-center gap-1 text-xs">
-                            <CheckCircle2 className="w-4 h-4" /> Correct
-                          </span>
-                        ) : isStudentChoice ? (
-                          <span className="text-red-400 font-bold flex items-center gap-1 text-xs">
-                            <XCircle className="w-4 h-4" /> Incorrect
-                          </span>
-                        ) : null}
+                        {!isPoll ? (
+                          isCorrect ? (
+                            <span className="text-emerald-400 font-bold flex items-center gap-1 text-xs">
+                              <CheckCircle2 className="w-4 h-4" /> Correct Answer
+                            </span>
+                          ) : isStudentChoice ? (
+                            <span className="text-red-400 font-bold flex items-center gap-1 text-xs">
+                              <XCircle className="w-4 h-4" /> Incorrect
+                            </span>
+                          ) : null
+                        ) : (
+                          isStudentChoice && (
+                            <span className="text-indigo-400 font-bold text-xs flex items-center gap-1">
+                              <CheckCircle2 className="w-4 h-4" /> Response Counted
+                            </span>
+                          )
+                        )}
                       </div>
                     );
                   })}
@@ -702,7 +843,7 @@ export const StudentPlayPage: React.FC<StudentPlayPageProps> = ({
 
                 {activeQuestion.question.explanation && (
                   <div className="p-4 bg-indigo-950/40 border border-indigo-800 rounded-2xl text-xs text-indigo-200">
-                    <strong className="text-white block mb-1">Instructor Review Note:</strong>
+                    <strong className="text-white block mb-1">Instructor Review Note &amp; Solution:</strong>
                     {activeQuestion.question.explanation}
                   </div>
                 )}

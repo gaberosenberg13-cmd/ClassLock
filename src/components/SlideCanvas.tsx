@@ -5,12 +5,14 @@ interface SlideCanvasProps {
   mode: 'off' | 'laser' | 'pen';
   penColor: string;
   onClear?: () => void;
+  onLaserMove?: (pos: { x: number; y: number; visible: boolean }) => void;
   children: React.ReactNode;
 }
 
 export const SlideCanvas: React.FC<SlideCanvasProps> = ({
   mode,
   penColor,
+  onLaserMove,
   children,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -58,7 +60,10 @@ export const SlideCanvas: React.FC<SlideCanvasProps> = ({
     const y = e.clientY - rect.top;
 
     if (mode === 'laser') {
+      const nx = rect.width > 0 ? Math.max(0, Math.min(1, x / rect.width)) : 0;
+      const ny = rect.height > 0 ? Math.max(0, Math.min(1, y / rect.height)) : 0;
       setLaserPos({ x, y, visible: true });
+      onLaserMove?.({ x: nx, y: ny, visible: true });
     }
 
     if (mode === 'pen' && isDrawing && canvasRef.current) {
@@ -77,6 +82,9 @@ export const SlideCanvas: React.FC<SlideCanvasProps> = ({
   const handlePointerLeave = () => {
     setIsDrawing(false);
     setLaserPos(prev => ({ ...prev, visible: false }));
+    if (mode === 'laser') {
+      onLaserMove?.({ x: 0, y: 0, visible: false });
+    }
   };
 
   return (

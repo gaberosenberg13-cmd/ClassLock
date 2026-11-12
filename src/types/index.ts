@@ -23,6 +23,8 @@ export interface Slide {
   content: string[]; // Bullet points or paragraphs
   imageUrl?: string;
   imageAlt?: string;
+  embedUrl?: string; // For Google Slides or external interactive embeds
+  sourceUrl?: string; // Direct link to original presentation source
   notes?: string;
   question?: Question;
 }
@@ -76,7 +78,7 @@ export interface StudentResponse {
 }
 
 export interface GameSession {
-  gameId: 'quiz_race' | 'memory_match';
+  gameId: 'quiz_race' | 'memory_match' | 'kahoot_trivia';
   gameTitle: string;
   status: 'lobby' | 'in_progress' | 'completed';
   startedAt?: string;
@@ -122,6 +124,12 @@ export interface LiveSession {
     acceptingAnswers: boolean;
   };
   activeGame?: GameSession;
+  laserPointer?: {
+    x: number; // 0..1 normalized horizontal position
+    y: number; // 0..1 normalized vertical position
+    visible: boolean;
+    timestamp?: number;
+  };
   participants: Record<string, Participant>;
   violations: StudentViolation[];
   responses: StudentResponse[];

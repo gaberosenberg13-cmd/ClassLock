@@ -4,13 +4,13 @@ import { sessionStore } from '../services/storage.ts';
 
 interface GamesLibraryPageProps {
   onNavigate: (route: string) => void;
-  onStartSessionWithGame?: (gameId: 'quiz_race' | 'memory_match') => void;
+  onStartSessionWithGame?: (gameId: 'quiz_race' | 'memory_match' | 'kahoot_trivia') => void;
 }
 
 export const GamesLibraryPage: React.FC<GamesLibraryPageProps> = ({
   onNavigate,
 }) => {
-  const handleLaunchGameDemo = (gameId: 'quiz_race' | 'memory_match') => {
+  const handleLaunchGameDemo = (gameId: 'quiz_race' | 'memory_match' | 'kahoot_trivia') => {
     const presentations = sessionStore.getPresentations();
     const pres = presentations[0];
     const session = sessionStore.createSession(pres.id);
@@ -39,6 +39,48 @@ export const GamesLibraryPage: React.FC<GamesLibraryPageProps> = ({
           <p className="text-[#3d3a34] text-base leading-relaxed">
             Review games designed to test recall and retention between lecture slides. Scores stream straight to the session spreadsheet without requiring accounts.
           </p>
+        </div>
+
+        {/* Featured Card: Kahoot Live Arena */}
+        <div className="bg-[#171614] text-white p-8 sm:p-10 mb-8 border border-[#171614] shadow-[6px_6px_0px_0px_#eb4b26]">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 pb-6 mb-6 border-b border-white/15">
+            <div>
+              <div className="flex items-center gap-2 font-mono text-xs text-amber-400 mb-2">
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                <span className="uppercase tracking-widest font-bold">NEW FEATURE · POPULAR</span>
+              </div>
+              <h2 className="font-serif italic text-3xl sm:text-4xl text-white">
+                Kahoot-Style Live Trivia Arena
+              </h2>
+            </div>
+            <button
+              type="button"
+              onClick={() => handleLaunchGameDemo('kahoot_trivia')}
+              className="inline-flex items-center justify-center gap-2.5 px-6 py-3.5 bg-amber-400 hover:bg-amber-300 text-slate-950 font-mono text-xs uppercase tracking-wider font-extrabold transition-all cursor-pointer shrink-0 shadow-lg"
+            >
+              <Play className="w-4 h-4 fill-current" />
+              <span>Launch Kahoot Arena</span>
+            </button>
+          </div>
+
+          <p className="text-zinc-300 text-sm leading-relaxed mb-6 max-w-3xl">
+            Project high-yield questions on the podium screen while student phones and laptops transform into the iconic 4-shape response pad (▲ Red, ◆ Blue, ● Yellow, ■ Green). Includes speed-weighted accuracy points, suspense countdown timers, live response bar charts, answer streaks, and a final 3D podium.
+          </p>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 font-mono text-xs text-zinc-400 pt-4 border-t border-white/10">
+            <div className="flex items-center gap-2">
+              <span className="text-amber-400 font-bold">▲ ◆ ● ■</span>
+              <span>4-quadrant tactile touchpads</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-amber-400 font-bold">⚡ 1,000 pts</span>
+              <span>Speed bonus + streak multiplier</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-amber-400 font-bold">🏆 Podium</span>
+              <span>Top 5 leaderboard &amp; gradebook sync</span>
+            </div>
+          </div>
         </div>
 
         {/* Asymmetrical Studio Game Cards */}

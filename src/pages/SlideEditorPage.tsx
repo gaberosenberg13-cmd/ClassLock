@@ -22,10 +22,15 @@ import {
   Upload,
   Layers,
   Download,
+  Loader2,
 } from 'lucide-react';
 import { sessionStore } from '../services/storage.ts';
 import { SlideImportModal } from '../components/SlideImportModal.tsx';
 import { downloadDeckAsJson, ImportedDeckResult } from '../services/slideImporter.ts';
+import {
+  generateAiQuestionForSingleSlide,
+  generateAiQuestionsForSlides,
+} from '../services/aiQuestionGenerator.ts';
 
 interface SlideEditorPageProps {
   presentationId: string;
@@ -51,6 +56,9 @@ export const SlideEditorPage: React.FC<SlideEditorPageProps> = ({
   const [selectedSlideIndex, setSelectedSlideIndex] = useState(0);
   const [hasSavedToast, setHasSavedToast] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [isGeneratingSingleAi, setIsGeneratingSingleAi] = useState(false);
+  const [isGeneratingAllAi, setIsGeneratingAllAi] = useState(false);
+  const [aiStatusBanner, setAiStatusBanner] = useState<{ text: string; type: 'info' | 'success' | 'error' } | null>(null);
 
   useEffect(() => {
     const pres = sessionStore.getPresentationById(presentationId);
@@ -211,6 +219,86 @@ export const SlideEditorPage: React.FC<SlideEditorPageProps> = ({
     }
   };
 
+  const handleGenerateSingleAiQuestion = async () => {
+    if (!currentSlide || isGeneratingSingleAi) return;
+    setIsGeneratingSingleAi(true);
+    setAiStatusBanner({ text: 'Gemini AI is reading this slide and authoring a checkpoint question...', type: 'info' });
+
+    try {
+      const generated = await generateAiQuestionForSingleSlide(currentSlide, selectedSlideIndex);
+      if (generated) {
+        handleUpdateCurrentSlide({ question: generated });
+        setAiStatusBanner({ text: 'AI checkpoint question generated successfully!', type: 'success' });
+        setTimeout(() => setAiStatusBanner(null), 3500);
+      } else {
+        setAiStatusBanner({ text: 'Could not generate a question. Please ensure the slide has content.', type: 'error' });
+        setTimeout(() => setAiStatusBanner(null), 4000);
+      }
+    } catch (err: any) {
+      console.error('Single AI question generation error:', err);
+      setAiStatusBanner({ text: 'AI question generation failed. Please try again.', type: 'error' });
+      setTimeout(() => setAiStatusBanner(null), 4000);
+    } finally {
+      setIsGeneratingSingleAi(false);
+    }
+  };
+
+  const handleGenerateAllAiQuestions = async () => {
+    if (!presentation || isGeneratingAllAi) return;
+    const slidesNeedingQuestions = presentation.slides.filter(s => !s.question);
+    if (slidesNeedingQuestions.length === 0) {
+      setAiStatusBanner({ text: 'All slides already have checkpoint questions attached.', type: 'info' });
+      setTimeout(() => setAiStatusBanner(null), 3000);
+      return;
+    }
+
+    setIsGeneratingAllAi(true);
+    setAiStatusBanner({
+      text: `Gemini AI is analyzing ${slidesNeedingQuestions.length} slide${slidesNeedingQuestions.length > 1 ? 's' : ''}...`,
+      type: 'info',
+    });
+
+    try {
+      const results = await generateAiQuestionsForSlides(presentation.slides, true);
+      if (results.length > 0) {
+        setPresentation(prev => {
+          if (!prev) return null;
+          const updatedSlides = [...prev.slides];
+          for (const item of results) {
+            if (updatedSlides[item.slideIndex]) {
+              updatedSlides[item.slideIndex] = {
+                ...updatedSlides[item.slideIndex],
+                question: item.question,
+              };
+            }
+          }
+          const updatedPres: Presentation = {
+            ...prev,
+            slides: updatedSlides,
+            updatedAt: new Date().toISOString(),
+          };
+          sessionStore.savePresentation(updatedPres);
+          return updatedPres;
+        });
+
+        setAiStatusBanner({
+          text: `Generated ${results.length} checkpoint question${results.length > 1 ? 's' : ''} with Gemini AI!`,
+          type: 'success',
+        });
+        setTimeout(() => setAiStatusBanner(null), 4000);
+      } else {
+        setAiStatusBanner({ text: 'No questions generated. Check your slide text.', type: 'error' });
+        setTimeout(() => setAiStatusBanner(null), 3000);
+      }
+    } catch (err: any) {
+      console.error('Batch AI question generation error:', err);
+      setAiStatusBanner({ text: 'AI question generation encountered an issue. Please try again.', type: 'error' });
+      setTimeout(() => setAiStatusBanner(null), 4000);
+    } finally {
+      setIsGeneratingAllAi(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       {/* Top Navbar */}
@@ -314,6 +402,30 @@ export const SlideEditorPage: React.FC<SlideEditorPageProps> = ({
             </div>
           </div>
 
+          {/* Batch AI Questions Button for whole deck */}
+          {presentation.slides.some(s => !s.question) && (
+            <button
+              onClick={handleGenerateAllAiQuestions}
+              disabled={isGeneratingAllAi}
+              className="w-full mb-3 px-3 py-2 bg-[#f3efe8] hover:bg-[#eae4d9] border border-[#dcd6ca] text-[#171614] rounded flex items-center justify-between text-xs font-mono transition-colors cursor-pointer disabled:opacity-50"
+              title="Read all slides missing checkpoint questions and generate them with Gemini AI"
+            >
+              <div className="flex items-center gap-1.5">
+                {isGeneratingAllAi ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#eb4b26]" />
+                ) : (
+                  <Sparkles className="w-3.5 h-3.5 text-[#eb4b26]" />
+                )}
+                <span className="font-semibold text-[11px] uppercase tracking-wider">
+                  {isGeneratingAllAi ? 'Analyzing...' : 'AI Auto-Questions'}
+                </span>
+              </div>
+              <span className="text-[10px] bg-[#eb4b26]/10 text-[#eb4b26] px-1.5 py-0.5 rounded font-mono font-bold">
+                {presentation.slides.filter(s => !s.question).length} missing
+              </span>
+            </button>
+          )}
+
           <div className="space-y-2 flex-1">
             {presentation.slides.map((s, idx) => {
               const isSelected = idx === selectedSlideIndex;
@@ -387,6 +499,42 @@ export const SlideEditorPage: React.FC<SlideEditorPageProps> = ({
                 className="w-full text-2xl font-bold text-slate-900 border-b border-slate-200 focus:border-indigo-600 focus:outline-hidden py-1"
               />
             </div>
+
+            {currentSlide.embedUrl && (
+              <div className="mb-6 bg-slate-900 border border-slate-800 rounded-xl p-4 text-white shadow-sm">
+                <div className="flex items-center justify-between text-xs font-mono text-slate-300 mb-2.5">
+                  <span className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    <strong className="text-white">Google Slides Embedded Deck</strong>
+                  </span>
+                  <div className="flex items-center gap-3">
+                    <a
+                      href={currentSlide.sourceUrl || currentSlide.embedUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-indigo-400 hover:text-indigo-300 underline font-sans font-medium"
+                    >
+                      Open in Google Slides ↗
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => handleUpdateCurrentSlide({ embedUrl: undefined, sourceUrl: undefined })}
+                      className="text-xs text-rose-400 hover:text-rose-300 underline font-sans cursor-pointer"
+                    >
+                      Detach Embed
+                    </button>
+                  </div>
+                </div>
+                <div className="relative w-full aspect-video rounded-lg overflow-hidden border border-slate-700 bg-black">
+                  <iframe
+                    src={currentSlide.embedUrl}
+                    title="Slide Preview"
+                    className="w-full h-full border-0"
+                    loading="lazy"
+                  />
+                </div>
+              </div>
+            )}
 
             {/* Bullets / Paragraphs Editor */}
             <div className="mb-6">
@@ -497,7 +645,7 @@ export const SlideEditorPage: React.FC<SlideEditorPageProps> = ({
 
           {/* Interactive Question Builder Block */}
           <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-6 sm:p-8">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
               <div className="flex items-center gap-3">
                 <div className="p-2 bg-amber-50 text-amber-600 rounded-lg">
                   <HelpCircle className="w-5 h-5" />
@@ -510,18 +658,75 @@ export const SlideEditorPage: React.FC<SlideEditorPageProps> = ({
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={handleToggleQuestion}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-                  currentSlide.question
-                    ? 'bg-red-50 text-red-600 hover:bg-red-100'
-                    : 'bg-indigo-600 text-white hover:bg-indigo-500'
+              <div className="flex items-center gap-2">
+                {currentSlide.question ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleGenerateSingleAiQuestion}
+                      disabled={isGeneratingSingleAi}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 transition-colors cursor-pointer disabled:opacity-50"
+                      title="Re-read this slide with Gemini AI and generate a new question"
+                    >
+                      {isGeneratingSingleAi ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-[#eb4b26]" />
+                      ) : (
+                        <Sparkles className="w-3.5 h-3.5 text-[#eb4b26]" />
+                      )}
+                      <span>{isGeneratingSingleAi ? 'Regenerating...' : 'Regenerate with AI'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleToggleQuestion}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-50 text-red-600 hover:bg-red-100 transition-colors cursor-pointer"
+                    >
+                      Remove
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleGenerateSingleAiQuestion}
+                      disabled={isGeneratingSingleAi}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-[#eb4b26] text-white hover:bg-[#cb3815] shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      {isGeneratingSingleAi ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3.5 h-3.5" />
+                      )}
+                      <span>{isGeneratingSingleAi ? 'AI Reading Slide...' : 'Generate with AI'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleToggleQuestion}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors cursor-pointer"
+                    >
+                      + Add Manually
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* AI Status Notification */}
+            {aiStatusBanner && (
+              <div
+                className={`mb-4 px-3.5 py-2.5 rounded-lg text-xs flex items-center gap-2 font-mono transition-all ${
+                  aiStatusBanner.type === 'success'
+                    ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                    : aiStatusBanner.type === 'error'
+                    ? 'bg-red-50 text-red-800 border border-red-200'
+                    : 'bg-amber-50 text-amber-800 border border-amber-200'
                 }`}
               >
-                {currentSlide.question ? 'Remove Question' : '+ Add Question to Slide'}
-              </button>
-            </div>
+                {aiStatusBanner.type === 'info' && <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />}
+                {aiStatusBanner.type === 'success' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />}
+                {aiStatusBanner.type === 'error' && <Sparkles className="w-3.5 h-3.5 text-red-600 shrink-0" />}
+                <span>{aiStatusBanner.text}</span>
+              </div>
+            )}
 
             {currentSlide.question && (
               <div className="pt-4 border-t border-slate-100 space-y-4">

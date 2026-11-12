@@ -6,6 +6,7 @@ import {
   evaluateResponse,
   calculateStudentViolationStatus,
   calculateRaceProgress,
+  calculateKahootScore,
   createMemoryMatchDeck,
   exportGradebookCsv,
 } from './sessionRules.ts';
@@ -171,4 +172,26 @@ test('exportGradebookCsv outputs properly formatted CSV with all columns', () =>
   assert.ok(csv.includes('"Alice Johnson"'));
   assert.ok(csv.includes('"STU-101"'));
   assert.ok(csv.includes('30,1,1,100%,1,Active'));
+});
+
+test('calculateKahootScore awards high points for fast correct answers with streaks', () => {
+  // Fast answer (28s left out of 30s)
+  const fast = calculateKahootScore(true, 28, 30, 0);
+  assert.ok(fast.points >= 950, 'Fast answer should score near 1000');
+  assert.equal(fast.newStreak, 1);
+
+  // Slow answer (2s left out of 30s)
+  const slow = calculateKahootScore(true, 2, 30, 0);
+  assert.ok(slow.points <= 600, 'Slow answer should score near 500');
+  assert.equal(slow.newStreak, 1);
+
+  // Streak bonus (3 in a row)
+  const streakResult = calculateKahootScore(true, 20, 30, 3);
+  assert.ok(streakResult.points > fast.points - 200, 'Streak should add bonus');
+  assert.equal(streakResult.newStreak, 4);
+
+  // Incorrect answer = 0 pts and resets streak
+  const wrong = calculateKahootScore(false, 25, 30, 5);
+  assert.equal(wrong.points, 0);
+  assert.equal(wrong.newStreak, 0);
 });

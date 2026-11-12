@@ -105,6 +105,44 @@ export function calculateRaceProgress(correctAnswers: number, targetLaps: number
   return Math.min(100, Math.round(progress));
 }
 
+/**
+ * Kahoot standard shape and color themes:
+ * 0: Red Triangle, 1: Blue Diamond, 2: Yellow Circle, 3: Green Square
+ */
+export const KAHOOT_SHAPES = [
+  { id: 'opt-0', label: 'Triangle', symbol: '▲', color: '#e21b3c', bgClass: 'bg-[#e21b3c]', hoverClass: 'hover:bg-[#c41331]', textClass: 'text-white' },
+  { id: 'opt-1', label: 'Diamond', symbol: '◆', color: '#1368ce', bgClass: 'bg-[#1368ce]', hoverClass: 'hover:bg-[#0f52a5]', textClass: 'text-white' },
+  { id: 'opt-2', label: 'Circle', symbol: '●', color: '#d89e00', bgClass: 'bg-[#d89e00]', hoverClass: 'hover:bg-[#b08100]', textClass: 'text-white' },
+  { id: 'opt-3', label: 'Square', symbol: '■', color: '#26890c', bgClass: 'bg-[#26890c]', hoverClass: 'hover:bg-[#1e6e09]', textClass: 'text-white' },
+];
+
+/**
+ * Calculates Kahoot-style speed and accuracy score.
+ * Correct answer = up to 1000 points based on speed + streak bonus (up to 250 pts).
+ */
+export function calculateKahootScore(
+  isCorrect: boolean,
+  timeRemainingSec: number,
+  totalTimeSec: number = 30,
+  currentStreak: number = 0
+): { points: number; newStreak: number } {
+  if (!isCorrect) {
+    return { points: 0, newStreak: 0 };
+  }
+
+  const validTotal = Math.max(1, totalTimeSec);
+  const ratio = Math.max(0, Math.min(1, timeRemainingSec / validTotal));
+  // Scaled from 500 (last second) to 1000 (instant answer)
+  const basePoints = Math.round(500 + 500 * ratio);
+  const nextStreak = currentStreak + 1;
+  const streakBonus = Math.min((nextStreak - 1) * 50, 250);
+
+  return {
+    points: basePoints + streakBonus,
+    newStreak: nextStreak,
+  };
+}
+
 export interface MemoryCard {
   id: string;
   pairId: string;

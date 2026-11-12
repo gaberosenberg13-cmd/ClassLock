@@ -21,6 +21,7 @@ import {
   parseGoogleSlidesUrl,
   ImportedDeckResult,
 } from '../services/slideImporter.ts';
+import { generateAiQuestionsForSlides } from '../services/aiQuestionGenerator.ts';
 
 interface SlideImportModalProps {
   isOpen: boolean;
@@ -49,6 +50,7 @@ export const SlideImportModal: React.FC<SlideImportModalProps> = ({
   const [googleUrl, setGoogleUrl] = useState('');
   const [googleTitle, setGoogleTitle] = useState(existingPresentationTitle || 'Google Slides Lecture');
   const [googleSlideCount, setGoogleSlideCount] = useState(6);
+  const [googleNotesTopic, setGoogleNotesTopic] = useState('');
   const [googleError, setGoogleError] = useState('');
 
   // Paste Text state
@@ -56,7 +58,46 @@ export const SlideImportModal: React.FC<SlideImportModalProps> = ({
   const [textTitle, setTextTitle] = useState(existingPresentationTitle || 'Lecture Outline');
   const [textError, setTextError] = useState('');
 
+  // AI Question Generation toggle & status
+  const [autoGenerateAiQuestions, setAutoGenerateAiQuestions] = useState(true);
+  const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+  const [aiStatusMessage, setAiStatusMessage] = useState('');
+
   if (!isOpen) return null;
+
+  const finalizeImport = async (result: ImportedDeckResult) => {
+    if (autoGenerateAiQuestions && result.slides.length > 0) {
+      setIsGeneratingAi(true);
+      setAiStatusMessage(`Analyzing ${result.slides.length} slides and generating AI questions with Gemini...`);
+      try {
+        const generated = await generateAiQuestionsForSlides(result.slides, true);
+        const enrichedSlides = [...result.slides];
+        for (const item of generated) {
+          if (enrichedSlides[item.slideIndex]) {
+            enrichedSlides[item.slideIndex] = {
+              ...enrichedSlides[item.slideIndex],
+              question: item.question,
+            };
+          }
+        }
+        onImportComplete({
+          ...result,
+          slides: enrichedSlides,
+        });
+        onClose();
+      } catch (err: any) {
+        console.warn('AI question generation encountered an issue, proceeding with parsed slides:', err);
+        onImportComplete(result);
+        onClose();
+      } finally {
+        setIsGeneratingAi(false);
+        setAiStatusMessage('');
+      }
+    } else {
+      onImportComplete(result);
+      onClose();
+    }
+  };
 
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault();
@@ -77,19 +118,16 @@ export const SlideImportModal: React.FC<SlideImportModalProps> = ({
 
       if (fileName.endsWith('.pptx')) {
         const result = await parsePptxFile(file);
-        onImportComplete(result);
-        onClose();
+        await finalizeImport(result);
       } else if (fileName.endsWith('.json')) {
         const text = await file.text();
         const result = parseJsonDeck(text);
-        onImportComplete(result);
-        onClose();
+        await finalizeImport(result);
       } else if (fileName.endsWith('.md') || fileName.endsWith('.txt')) {
         const text = await file.text();
         const deckTitle = file.name.replace(/\.(md|txt)$/i, '');
         const result = parseMarkdownToSlides(text, deckTitle);
-        onImportComplete(result);
-        onClose();
+        await finalizeImport(result);
       } else {
         setFileError('Unsupported file type. Please upload a PowerPoint (.pptx), Markdown (.md), Text (.txt), or ClassLock JSON (.json) file.');
       }
@@ -116,7 +154,7 @@ export const SlideImportModal: React.FC<SlideImportModalProps> = ({
     }
   };
 
-  const handleGoogleImport = (e: React.FormEvent) => {
+  const handleGoogleImport = async (e: React.FormEvent) => {
     e.preventDefault();
     setGoogleError('');
 
@@ -131,12 +169,11 @@ export const SlideImportModal: React.FC<SlideImportModalProps> = ({
       return;
     }
 
-    const result = createSlidesFromGoogleSlides(googleTitle, googleUrl.trim(), googleSlideCount);
-    onImportComplete(result);
-    onClose();
+    const result = createSlidesFromGoogleSlides(googleTitle, googleUrl.trim(), googleSlideCount, googleNotesTopic.trim());
+    await finalizeImport(result);
   };
 
-  const handleTextImport = (e: React.FormEvent) => {
+  const handleTextImport = async (e: React.FormEvent) => {
     e.preventDefault();
     setTextError('');
 
@@ -146,8 +183,7 @@ export const SlideImportModal: React.FC<SlideImportModalProps> = ({
     }
 
     const result = parseMarkdownToSlides(pastedText, textTitle);
-    onImportComplete(result);
-    onClose();
+    await finalizeImport(result);
   };
 
   const handleLoadSampleOutline = (subject: 'ob' | 'biology' | 'history') => {
@@ -359,8 +395,25 @@ D) George Washington
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 sm:p-6 overflow-y-auto font-normal">
-      <div className="bg-[#faf8f5] text-[#171614] border border-[#171614] shadow-[8px_8px_0px_0px_#171614] w-full max-w-2xl my-8 overflow-hidden">
+      <div className="relative bg-[#faf8f5] text-[#171614] border border-[#171614] shadow-[8px_8px_0px_0px_#171614] w-full max-w-2xl my-8 overflow-hidden">
         
+        {/* Loading Overlay when Gemini AI is generating questions */}
+        {isGeneratingAi && (
+          <div className="absolute inset-0 bg-[#faf8f5]/95 backdrop-blur-xs flex flex-col items-center justify-center p-6 z-30 text-center animate-in fade-in">
+            <div className="w-12 h-12 rounded-full border-3 border-[#eb4b26] border-t-transparent animate-spin mb-4" />
+            <div className="inline-flex items-center gap-2 font-mono text-xs uppercase tracking-wider text-[#eb4b26] font-bold mb-2">
+              <Sparkles className="w-4 h-4 animate-pulse" />
+              <span>Gemini 3.8 Flash AI At Work</span>
+            </div>
+            <h4 className="font-serif italic text-2xl text-[#171614] mb-2">
+              Analyzing Slides & Authoring Checkpoints
+            </h4>
+            <p className="font-mono text-xs text-[#6e6961] max-w-md leading-relaxed">
+              {aiStatusMessage || 'Reading slide titles, body bullet points, and presenter notes to synthesize high-yield checkpoint questions...'}
+            </p>
+          </div>
+        )}
+
         {/* Modal Top Bar */}
         <div className="bg-[#171614] text-white px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -427,6 +480,38 @@ D) George Washington
             <BookOpen className="w-3.5 h-3.5" />
             <span>Pre-made Decks</span>
           </button>
+        </div>
+
+        {/* AI Question Auto-Generation Toggle Banner */}
+        <div className="px-6 py-3 bg-[#f2eee7] border-b border-[#e5e0d8] flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-1.5 bg-[#eb4b26]/10 text-[#eb4b26] border border-[#eb4b26]/20">
+              <Sparkles className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-xs font-bold text-[#171614] uppercase tracking-wider">
+                  Auto-generate AI Questions
+                </span>
+                <span className="px-1.5 py-0.5 bg-[#171614] text-[#faf8f5] font-mono text-[9px] uppercase font-bold tracking-wider">
+                  Gemini AI
+                </span>
+              </div>
+              <p className="font-mono text-[11px] text-[#6e6961]">
+                Reads through slides on import and creates interactive checkpoint questions automatically.
+              </p>
+            </div>
+          </div>
+
+          <label className="relative inline-flex items-center cursor-pointer shrink-0">
+            <input
+              type="checkbox"
+              checked={autoGenerateAiQuestions}
+              onChange={e => setAutoGenerateAiQuestions(e.target.checked)}
+              className="sr-only peer"
+            />
+            <div className="w-10 h-5 bg-[#d6cfc2] peer-focus:outline-none peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-[#171614] after:border after:h-4 after:w-4 after:transition-all peer-checked:bg-[#eb4b26]"></div>
+          </label>
         </div>
 
         {/* Tab Body */}
@@ -529,13 +614,13 @@ D) George Washington
                     type="text"
                     value={googleTitle}
                     onChange={e => setGoogleTitle(e.target.value)}
-                    placeholder="e.g. History Lecture 4"
+                    placeholder="e.g. Organizational Behavior & Motivation"
                     className="w-full px-3.5 py-2.5 font-sans text-xs bg-white border border-[#e5e0d8] focus:border-[#eb4b26] text-[#171614] focus:outline-hidden"
                   />
                 </div>
                 <div>
                   <label className="block font-mono text-[11px] uppercase tracking-wider text-[#6e6961] mb-1.5">
-                    Estimated Slide Count
+                    Slide Count
                   </label>
                   <input
                     type="number"
@@ -546,6 +631,23 @@ D) George Washington
                     className="w-full px-3.5 py-2.5 font-mono text-xs bg-white border border-[#e5e0d8] focus:border-[#eb4b26] text-[#171614] focus:outline-hidden"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="block font-mono text-[11px] uppercase tracking-wider text-[#6e6961] mb-1.5 flex items-center justify-between">
+                  <span>Topic &amp; Key Concepts (Helps AI generate targeted questions)</span>
+                  <span className="text-[#eb4b26] text-[10px] font-bold">Recommended for AI</span>
+                </label>
+                <textarea
+                  rows={2}
+                  value={googleNotesTopic}
+                  onChange={e => setGoogleNotesTopic(e.target.value)}
+                  placeholder="e.g. Herzberg Two-Factor Theory, Psychological Safety in Teams, Groupthink decision traps..."
+                  className="w-full px-3.5 py-2 font-sans text-xs bg-white border border-[#e5e0d8] focus:border-[#eb4b26] text-[#171614] focus:outline-hidden resize-none"
+                />
+                <p className="font-mono text-[10px] text-[#6e6961] mt-1">
+                  💡 Pro-tip: Ensure your Google Slides link access is set to <strong>"Anyone with the link can view"</strong> so the live slide viewer embeds smoothly on student devices.
+                </p>
               </div>
 
               {googleError && (

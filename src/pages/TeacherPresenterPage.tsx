@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   LiveSession,
   Presentation,
   Question,
   LockMode,
   StudentQuestionItem,
+  Slide,
 } from '../types/index.ts';
 import {
   ChevronLeft,
@@ -34,7 +35,63 @@ import { QRCodeModal } from '../components/QRCodeModal.tsx';
 import { SlideCanvas } from '../components/SlideCanvas.tsx';
 import { QuizRaceGame } from '../components/games/QuizRaceGame.tsx';
 import { MemoryMatchGame } from '../components/games/MemoryMatchGame.tsx';
+import { KahootTriviaGame } from '../components/games/KahootTriviaGame.tsx';
 import { playChime, playSuccess } from '../utils/soundEffects.ts';
+import { getSlideEmbedUrl } from '../services/slideImporter.ts';
+
+function buildSlideCheckpointQuestion(slide: Slide): Question {
+  const title = slide.title || 'Slide Concept Check';
+  const primaryConcept = slide.content?.[0] || title;
+
+  return {
+    id: `q-slide-${Date.now()}`,
+    type: 'multiple_choice',
+    prompt: `Checkpoint: Based on "${title}", which statement is correct?`,
+    points: 10,
+    timeLimitSeconds: 25,
+    options: [
+      {
+        id: 'opt-correct',
+        text: primaryConcept.length > 85 ? primaryConcept.substring(0, 85) + '...' : primaryConcept,
+        isCorrect: true,
+      },
+      {
+        id: 'opt-d1',
+        text: 'This concept applies only under hypothetical laboratory conditions with no practical effect.',
+        isCorrect: false,
+      },
+      {
+        id: 'opt-d2',
+        text: 'The principle has been disproven and superseded by recent operational standards.',
+        isCorrect: false,
+      },
+      {
+        id: 'opt-d3',
+        text: 'It only operates when individual accountability and system feedback are completely absent.',
+        isCorrect: false,
+      },
+    ],
+    explanation: `Correct! "${primaryConcept}" is the foundational principle highlighted on this slide.`,
+  };
+}
+
+function buildSlideTrueFalseQuestion(slide: Slide): Question {
+  const title = slide.title || 'Slide Key Concept';
+  const primaryConcept = slide.content?.[0] || title;
+
+  return {
+    id: `q-tf-${Date.now()}`,
+    type: 'true_false',
+    prompt: `True or False: "${primaryConcept}" accurately describes a core takeaway of this section.`,
+    points: 10,
+    timeLimitSeconds: 20,
+    options: [
+      { id: 'tf-true', text: 'True', isCorrect: true },
+      { id: 'tf-false', text: 'False', isCorrect: false },
+    ],
+    explanation: `True! "${primaryConcept}" is a central pillar presented on this slide.`,
+  };
+}
 
 interface TeacherPresenterPageProps {
   sessionIdOrCode: string;
@@ -58,6 +115,16 @@ export const TeacherPresenterPage: React.FC<TeacherPresenterPageProps> = ({
   const [penColor, setPenColor] = useState<string>('#2563eb');
   const [isFullscreenProjector, setIsFullscreenProjector] = useState(false);
 
+  const lastLaserSent = useRef<number>(0);
+  const handleLaserMove = (pos: { x: number; y: number; visible: boolean }) => {
+    if (!session?.joinCode) return;
+    const now = Date.now();
+    if (now - lastLaserSent.current > 40 || !pos.visible) {
+      lastLaserSent.current = now;
+      sessionStore.broadcastLaser(session.joinCode, pos);
+    }
+  };
+
   useEffect(() => {
     const sess = sessionStore.getSession(sessionIdOrCode);
     if (sess) {
@@ -68,7 +135,7 @@ export const TeacherPresenterPage: React.FC<TeacherPresenterPageProps> = ({
         fetch(`/api/sessions/${sess.joinCode}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session: sess, presentation: pres }),
+          body: JSON.stringify({ session: sess, presentation: pres, role: 'teacher' }),
         }).catch(() => {});
       }
     } else {
@@ -101,8 +168,32 @@ export const TeacherPresenterPage: React.FC<TeacherPresenterPageProps> = ({
       }
     }
 
+    // 1.2-second polling fallback to guarantee synced participant rosters & responses
+    const pollInterval = setInterval(() => {
+      if (sess?.joinCode) {
+        sessionStore.fetchServerSession(sess.joinCode).then(res => {
+          if (res?.session) {
+            setSession(prev => {
+              if (
+                !prev ||
+                Object.keys(res.session.participants || {}).length !== Object.keys(prev.participants || {}).length ||
+                (res.session.responses || []).length !== (prev.responses || []).length ||
+                (res.session.violations || []).length !== (prev.violations || []).length ||
+                (res.session.reactions || []).length !== (prev.reactions || []).length ||
+                (res.session.studentQuestions || []).length !== (prev.studentQuestions || []).length
+              ) {
+                return { ...res.session };
+              }
+              return prev;
+            });
+          }
+        });
+      }
+    }, 1200);
+
     return () => {
       unsubscribe();
+      clearInterval(pollInterval);
       if (eventSource) eventSource.close();
     };
   }, [sessionIdOrCode, onNavigate]);
@@ -170,10 +261,9 @@ export const TeacherPresenterPage: React.FC<TeacherPresenterPageProps> = ({
   };
 
   const handlePushQuestion = () => {
-    if (currentSlide.question) {
-      sessionStore.pushQuestion(session.id, currentSlide.question);
-      playChime();
-    }
+    const q = currentSlide.question || buildSlideCheckpointQuestion(currentSlide);
+    sessionStore.pushQuestion(session.id, q);
+    playChime();
   };
 
   const handleRevealAnswer = () => {
@@ -189,7 +279,7 @@ export const TeacherPresenterPage: React.FC<TeacherPresenterPageProps> = ({
     sessionStore.dismissQuestion(session.id);
   };
 
-  const handleLaunchGame = (gameId: 'quiz_race' | 'memory_match') => {
+  const handleLaunchGame = (gameId: 'quiz_race' | 'memory_match' | 'kahoot_trivia') => {
     sessionStore.launchGame(session.id, gameId);
   };
 
@@ -197,24 +287,30 @@ export const TeacherPresenterPage: React.FC<TeacherPresenterPageProps> = ({
     sessionStore.endGame(session.id);
   };
 
-  const handleLaunchQuickPoll = (type: 'abcd' | 'yesno' | 'confidence') => {
-    if (type === 'abcd') {
-      sessionStore.launchQuickPoll(session.id, 'Question Comprehension Check:', [
+  const handleLaunchQuickPoll = (type: 'slide_concept' | 'slide_tf' | 'abcd' | 'yesno' | 'confidence') => {
+    if (type === 'slide_concept') {
+      const q = buildSlideCheckpointQuestion(currentSlide);
+      sessionStore.pushQuestion(session.id, q);
+    } else if (type === 'slide_tf') {
+      const q = buildSlideTrueFalseQuestion(currentSlide);
+      sessionStore.pushQuestion(session.id, q);
+    } else if (type === 'abcd') {
+      sessionStore.launchQuickPoll(session.id, `Live Class Poll: Select your option for "${currentSlide.title}"`, [
         { id: 'opt-a', text: 'Option A' },
         { id: 'opt-b', text: 'Option B' },
         { id: 'opt-c', text: 'Option C' },
         { id: 'opt-d', text: 'Option D' },
       ]);
     } else if (type === 'yesno') {
-      sessionStore.launchQuickPoll(session.id, 'Pulse: Clear or need review?', [
-        { id: 'opt-yes', text: 'Yes / Understood' },
-        { id: 'opt-no', text: 'No / Need Review' },
+      sessionStore.launchQuickPoll(session.id, `Pulse Check on "${currentSlide.title}": Clear or need review?`, [
+        { id: 'opt-yes', text: 'Yes — Clear & Understood' },
+        { id: 'opt-no', text: 'No — Need Instructor Review' },
       ]);
     } else {
-      sessionStore.launchQuickPoll(session.id, 'Rate your confidence (1 to 5):', [
-        { id: 'c-high', text: '5 - Complete mastery' },
-        { id: 'c-med', text: '3 - Moderate understanding' },
-        { id: 'c-low', text: '1 - Explain again' },
+      sessionStore.launchQuickPoll(session.id, `Confidence Check on "${currentSlide.title}" (1 to 5):`, [
+        { id: 'c-high', text: '5 — Complete Mastery' },
+        { id: 'c-med', text: '3 — Moderate Understanding' },
+        { id: 'c-low', text: '1 — Needs Re-explanation' },
       ]);
     }
     setIsQuickPollModalOpen(false);
@@ -369,6 +465,26 @@ export const TeacherPresenterPage: React.FC<TeacherPresenterPageProps> = ({
                   }}
                   onTeacherEndGame={handleEndGame}
                 />
+              ) : session.activeGame.gameId === 'kahoot_trivia' ? (
+                <KahootTriviaGame
+                  session={session}
+                  isTeacher={true}
+                  onTeacherNextQuestion={() => {
+                    const currentIdx = session.activeGame?.currentQuestionIndex ?? 0;
+                    sessionStore.launchGame(session.id, 'kahoot_trivia', {
+                      phase: 'question',
+                    });
+                    setSession(prev => prev ? {
+                      ...prev,
+                      activeGame: {
+                        ...prev.activeGame!,
+                        currentQuestionIndex: currentIdx + 1,
+                        gameData: { phase: 'question' },
+                      },
+                    } : prev);
+                  }}
+                  onTeacherEndGame={handleEndGame}
+                />
               ) : (
                 <MemoryMatchGame
                   session={session}
@@ -379,7 +495,7 @@ export const TeacherPresenterPage: React.FC<TeacherPresenterPageProps> = ({
             </div>
           ) : (
             <div className="my-auto max-w-4xl mx-auto w-full">
-              <SlideCanvas mode={canvasMode} penColor={penColor}>
+              <SlideCanvas mode={canvasMode} penColor={penColor} onLaserMove={handleLaserMove}>
                 <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 sm:p-12 min-h-[460px] flex flex-col justify-between shadow-xs">
                   <div>
                     <div className="flex items-center justify-between text-xs font-mono text-zinc-500 uppercase tracking-wider mb-4">
@@ -393,28 +509,60 @@ export const TeacherPresenterPage: React.FC<TeacherPresenterPageProps> = ({
                       {currentSlide.title}
                     </h2>
 
-                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-                      <div className={currentSlide.imageUrl ? 'lg:col-span-7' : 'lg:col-span-12'}>
-                        <ul className="space-y-4">
-                          {currentSlide.content.map((point, idx) => (
-                            <li key={idx} className="flex items-start gap-3 text-zinc-300 text-base leading-relaxed font-normal">
-                              <span className="w-1.5 h-1.5 rounded-full bg-blue-500 mt-2.5 flex-shrink-0" />
-                              <span>{point}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
+                    {currentSlide.embedUrl ? (
+                      <div className="space-y-4 mb-4">
+                        <div className="flex flex-wrap items-center justify-between text-xs font-mono text-zinc-400 bg-zinc-950/90 px-3.5 py-2.5 rounded-xl border border-zinc-800">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+                            <span className="text-zinc-200 font-medium">Live Google Slides View</span>
+                            <span className="text-zinc-500">· Synced with student devices</span>
+                          </div>
+                          {(currentSlide.sourceUrl || currentSlide.embedUrl) && (
+                            <a
+                              href={currentSlide.sourceUrl || currentSlide.embedUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-blue-400 hover:text-blue-300 underline font-sans text-xs flex items-center gap-1 transition-colors"
+                            >
+                              Open in Google Slides ↗
+                            </a>
+                          )}
+                        </div>
 
-                      {currentSlide.imageUrl && (
-                        <div className="lg:col-span-5 rounded-xl overflow-hidden border border-zinc-800 bg-zinc-950">
-                          <img
-                            src={currentSlide.imageUrl}
-                            alt={currentSlide.imageAlt || currentSlide.title}
-                            className="w-full h-56 object-cover"
+                        <div className="relative w-full aspect-video rounded-xl overflow-hidden border border-zinc-800 bg-zinc-950 shadow-2xl">
+                          <iframe
+                            src={getSlideEmbedUrl(currentSlide.embedUrl, session.currentSlideIndex)}
+                            title={currentSlide.title || 'Google Slides Presentation'}
+                            className="w-full h-full border-0"
+                            allowFullScreen
+                            loading="lazy"
                           />
                         </div>
-                      )}
-                    </div>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                        <div className={currentSlide.imageUrl ? 'lg:col-span-7' : 'lg:col-span-12'}>
+                          <ul className="space-y-4">
+                            {currentSlide.content.map((point, idx) => (
+                              <li key={idx} className="flex items-start gap-3 text-zinc-300 text-base leading-relaxed font-normal">
+                                <span className="w-1.5 h-1.5 rounded-full bg-blue-500 mt-2.5 flex-shrink-0" />
+                                <span>{point}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        {currentSlide.imageUrl && (
+                          <div className="lg:col-span-5 rounded-xl overflow-hidden border border-zinc-800 bg-zinc-950">
+                            <img
+                              src={currentSlide.imageUrl}
+                              alt={currentSlide.imageAlt || currentSlide.title}
+                              className="w-full h-56 object-cover"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {currentSlide.notes && (
@@ -565,28 +713,41 @@ export const TeacherPresenterPage: React.FC<TeacherPresenterPageProps> = ({
                 Quick Poll
               </button>
 
-              {currentSlide.question && !activeQuestion && !session.activeGame && (
+              {!activeQuestion && !session.activeGame && (
                 <button
                   onClick={handlePushQuestion}
-                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg text-xs transition-colors cursor-pointer"
+                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg text-xs transition-colors cursor-pointer flex items-center gap-1.5 shadow-xs"
+                  title="Push a slide-specific graded question to all student screens"
                 >
-                  Push Question
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>{currentSlide.question ? 'Push Slide Question' : 'Push Slide Checkpoint'}</span>
                 </button>
               )}
 
               {!session.activeGame ? (
-                <button
-                  onClick={() => handleLaunchGame('quiz_race')}
-                  className="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white rounded-lg text-xs font-normal transition-colors cursor-pointer"
-                >
-                  Game
-                </button>
+                <>
+                  <button
+                    onClick={() => handleLaunchGame('kahoot_trivia')}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-amber-950 font-bold rounded-lg text-xs transition-all shadow-md cursor-pointer"
+                    title="Launch Kahoot-style 4-shape live quiz arena"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Kahoot Live</span>
+                  </button>
+
+                  <button
+                    onClick={() => handleLaunchGame('quiz_race')}
+                    className="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white rounded-lg text-xs font-normal transition-colors cursor-pointer"
+                  >
+                    Race Track
+                  </button>
+                </>
               ) : (
                 <button
                   onClick={handleEndGame}
-                  className="px-3 py-1.5 bg-zinc-900 text-zinc-400 hover:text-white rounded-lg text-xs font-normal cursor-pointer"
+                  className="px-3.5 py-1.5 bg-red-600/20 hover:bg-red-600/30 text-red-300 border border-red-500/30 rounded-lg text-xs font-semibold cursor-pointer"
                 >
-                  End Game
+                  End Game Mode
                 </button>
               )}
             </div>
@@ -670,40 +831,85 @@ export const TeacherPresenterPage: React.FC<TeacherPresenterPageProps> = ({
         presentationTitle={presentation.title}
       />
 
-      {/* Quick Poll Modal */}
+      {/* Quick Poll & Checkpoint Modal */}
       {isQuickPollModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/60 backdrop-blur-xs p-4">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-sm p-6 shadow-xl">
-            <h3 className="text-sm font-semibold text-white mb-2">Instant Quick Poll</h3>
-            <p className="text-xs font-normal text-zinc-400 mb-6">
-              Push an instant question to student devices:
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/70 backdrop-blur-xs p-4">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-md p-6 shadow-2xl">
+            <h3 className="text-sm font-semibold text-white mb-1">Push Question or Poll</h3>
+            <p className="text-xs font-normal text-zinc-400 mb-5">
+              Targeted to: <span className="text-blue-400 font-medium">"{currentSlide.title}"</span>
             </p>
-            <div className="space-y-2">
-              <button
-                onClick={() => handleLaunchQuickPoll('abcd')}
-                className="w-full p-3 bg-zinc-950 hover:bg-zinc-800 text-left border border-zinc-800 rounded-lg text-xs font-normal text-zinc-200 transition-colors"
-              >
-                Multiple Choice (A, B, C, D)
-              </button>
-              <button
-                onClick={() => handleLaunchQuickPoll('yesno')}
-                className="w-full p-3 bg-zinc-950 hover:bg-zinc-800 text-left border border-zinc-800 rounded-lg text-xs font-normal text-zinc-200 transition-colors"
-              >
-                Yes / No Check
-              </button>
-              <button
-                onClick={() => handleLaunchQuickPoll('confidence')}
-                className="w-full p-3 bg-zinc-950 hover:bg-zinc-800 text-left border border-zinc-800 rounded-lg text-xs font-normal text-zinc-200 transition-colors"
-              >
-                Confidence Scale (1 to 5)
-              </button>
+
+            {/* Section 1: Graded Checkpoints */}
+            <div className="mb-5">
+              <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 font-semibold mb-2 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                <span>Graded Checkpoints (10 Pts · 1 Correct Answer)</span>
+              </div>
+              <div className="space-y-2">
+                <button
+                  onClick={() => handleLaunchQuickPoll('slide_concept')}
+                  className="w-full p-3 bg-zinc-950 hover:bg-zinc-800/80 text-left border border-emerald-900/40 hover:border-emerald-600 rounded-xl transition-all cursor-pointer group"
+                >
+                  <div className="text-xs font-semibold text-zinc-100 group-hover:text-emerald-400 transition-colors">
+                    Slide Concept Checkpoint
+                  </div>
+                  <div className="text-[11px] text-zinc-400 mt-0.5 font-normal">
+                    AI-tailored 4-choice question directly evaluating slide takeaways with an exact correct answer.
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => handleLaunchQuickPoll('slide_tf')}
+                  className="w-full p-3 bg-zinc-950 hover:bg-zinc-800/80 text-left border border-emerald-900/40 hover:border-emerald-600 rounded-xl transition-all cursor-pointer group"
+                >
+                  <div className="text-xs font-semibold text-zinc-100 group-hover:text-emerald-400 transition-colors">
+                    True / False Slide Verification
+                  </div>
+                  <div className="text-[11px] text-zinc-400 mt-0.5 font-normal">
+                    Rapid 2-choice fact check based on slide notes and bullet points.
+                  </div>
+                </button>
+              </div>
             </div>
-            <div className="mt-6 text-right">
+
+            {/* Section 2: Pulse Polls */}
+            <div>
+              <div className="text-[11px] font-mono uppercase tracking-wider text-blue-400 font-semibold mb-2 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-blue-400" />
+                <span>Classroom Pulse Polls (Participation · No Wrong Answer)</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <button
+                  onClick={() => handleLaunchQuickPoll('yesno')}
+                  className="p-2.5 bg-zinc-950 hover:bg-zinc-800 text-left border border-zinc-800 rounded-lg text-xs font-normal text-zinc-300 transition-colors cursor-pointer"
+                >
+                  <div className="font-semibold text-zinc-200">Yes / No</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Quick clarity check</div>
+                </button>
+                <button
+                  onClick={() => handleLaunchQuickPoll('confidence')}
+                  className="p-2.5 bg-zinc-950 hover:bg-zinc-800 text-left border border-zinc-800 rounded-lg text-xs font-normal text-zinc-300 transition-colors cursor-pointer"
+                >
+                  <div className="font-semibold text-zinc-200">1 to 5 Scale</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Confidence gauge</div>
+                </button>
+                <button
+                  onClick={() => handleLaunchQuickPoll('abcd')}
+                  className="p-2.5 bg-zinc-950 hover:bg-zinc-800 text-left border border-zinc-800 rounded-lg text-xs font-normal text-zinc-300 transition-colors cursor-pointer"
+                >
+                  <div className="font-semibold text-zinc-200">ABCD Poll</div>
+                  <div className="text-[10px] text-zinc-500 mt-0.5">Open 4-choice</div>
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-6 pt-3 border-t border-zinc-800/80 text-right">
               <button
                 onClick={() => setIsQuickPollModalOpen(false)}
-                className="text-xs text-zinc-500 hover:text-zinc-300 font-normal"
+                className="text-xs text-zinc-400 hover:text-zinc-200 font-normal px-3 py-1.5 cursor-pointer"
               >
-                Cancel
+                Close
               </button>
             </div>
           </div>

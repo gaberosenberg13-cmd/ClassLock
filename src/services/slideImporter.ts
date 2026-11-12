@@ -15,17 +15,58 @@ export function parseGoogleSlidesUrl(inputUrl: string): {
   docId: string;
   embedUrl: string;
   viewUrl: string;
+  isPublished: boolean;
 } | null {
   if (!inputUrl || typeof inputUrl !== 'string') return null;
-  const match = inputUrl.match(/\/presentation\/d\/([a-zA-Z0-9_-]+)/);
-  if (!match || !match[1]) return null;
+  const trimmed = inputUrl.trim();
 
-  const docId = match[1];
-  return {
-    docId,
-    embedUrl: `https://docs.google.com/presentation/d/${docId}/embed?start=false&loop=false&delayms=3000`,
-    viewUrl: `https://docs.google.com/presentation/d/${docId}/edit`,
-  };
+  // Pattern 1: Published to web link (/d/e/2PACX-.../pub)
+  const pubMatch = trimmed.match(/\/presentation\/d\/e\/([a-zA-Z0-9_-]+)/);
+  if (pubMatch && pubMatch[1]) {
+    const pubId = pubMatch[1];
+    return {
+      docId: pubId,
+      embedUrl: `https://docs.google.com/presentation/d/e/${pubId}/embed?start=false&loop=false&delayms=3000`,
+      viewUrl: `https://docs.google.com/presentation/d/e/${pubId}/pub`,
+      isPublished: true,
+    };
+  }
+
+  // Pattern 2: Standard presentation link (/d/<id>/...)
+  const docMatch = trimmed.match(/\/presentation\/d\/([a-zA-Z0-9_-]+)/);
+  if (docMatch && docMatch[1]) {
+    const docId = docMatch[1];
+    return {
+      docId,
+      embedUrl: `https://docs.google.com/presentation/d/${docId}/embed?start=false&loop=false&delayms=3000`,
+      viewUrl: `https://docs.google.com/presentation/d/${docId}/edit`,
+      isPublished: false,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Ensures a Google Slides embed URL targets the exact 1-indexed slide number.
+ * Appends or updates `slide=N` parameter so both teacher and student iframes
+ * display the exact synchronized slide.
+ */
+export function getSlideEmbedUrl(baseEmbedUrl: string | undefined, slideIndex: number): string {
+  if (!baseEmbedUrl) return '';
+  const targetSlideNum = Math.max(1, slideIndex + 1);
+  try {
+    const url = new URL(baseEmbedUrl);
+    url.searchParams.set('slide', String(targetSlideNum));
+    return url.toString();
+  } catch {
+    if (baseEmbedUrl.includes('?')) {
+      const clean = baseEmbedUrl.replace(/([?&])slide=[^&]*/, '');
+      const separator = clean.includes('?') ? '&' : '?';
+      return `${clean}${separator}slide=${targetSlideNum}`;
+    }
+    return `${baseEmbedUrl}?slide=${targetSlideNum}`;
+  }
 }
 
 /**
@@ -35,40 +76,45 @@ export function parseGoogleSlidesUrl(inputUrl: string): {
 export function createSlidesFromGoogleSlides(
   title: string,
   url: string,
-  slideCount: number = 5
+  slideCount: number = 5,
+  topicContext: string = ''
 ): ImportedDeckResult {
   const parsed = parseGoogleSlidesUrl(url);
-  const embedUrl = parsed ? parsed.embedUrl : url;
+  const baseEmbedUrl = parsed ? parsed.embedUrl : url;
+  const viewUrl = parsed ? parsed.viewUrl : url;
 
   const slides: Slide[] = [];
   const safeCount = Math.max(1, Math.min(30, slideCount));
+  const effectiveTitle = title.trim() || 'Imported Google Slides';
 
   for (let i = 1; i <= safeCount; i++) {
     const isQuestionSlide = i === Math.ceil(safeCount / 2);
+    const sectionTopic = topicContext ? ` — ${topicContext}` : '';
     const slide: Slide = {
       id: `gslide-${Date.now()}-${i}`,
-      title: i === 1 ? title || 'Google Slides Presentation' : `Section ${i}: Synchronized Deck`,
+      title: i === 1 ? effectiveTitle : `Section ${i}: ${effectiveTitle}${sectionTopic}`,
       content: [
         `Google Slides Synced View · Slide ${i} of ${safeCount}`,
-        'Students view your presentation live in sync.',
+        topicContext ? `Topic: ${topicContext}` : 'Synchronized lecture presentation from Google Slides.',
         i === 1 ? 'Embedded presentation via Google Slides integration.' : 'Slide navigation locked to instructor broadcast.',
       ],
-      notes: `Imported from Google Slides: ${url}`,
-      imageUrl: 'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1200&q=80',
-      imageAlt: 'Google Slides presentation',
+      notes: `Google Slides Link: ${url}${topicContext ? ` | Context: ${topicContext}` : ''}`,
+      embedUrl: getSlideEmbedUrl(baseEmbedUrl, i - 1),
+      sourceUrl: viewUrl,
     };
 
     if (isQuestionSlide) {
       slide.question = {
         id: `gq-${Date.now()}-${i}`,
         type: 'multiple_choice',
-        prompt: 'Check for Understanding: What was the main takeaway from this section?',
+        prompt: `Comprehension Check: What is the primary focus of "${effectiveTitle}" in this section?`,
         points: 10,
         options: [
-          { id: 'opt-1', text: 'Core concept discussed in the slides', isCorrect: true },
-          { id: 'opt-2', text: 'Secondary detail or observation', isCorrect: false },
-          { id: 'opt-3', text: 'Unrelated counterexample', isCorrect: false },
+          { id: 'opt-1', text: 'Core theoretical principle and key mechanisms', isCorrect: true },
+          { id: 'opt-2', text: 'Incidental background anecdote', isCorrect: false },
+          { id: 'opt-3', text: 'Non-applicable counter-argument', isCorrect: false },
         ],
+        explanation: 'Active recall checkpoint ensuring class alignment before advancing.',
       };
     }
 
@@ -76,8 +122,8 @@ export function createSlidesFromGoogleSlides(
   }
 
   return {
-    title: title.trim() || 'Imported Google Slides Deck',
-    subject: 'Google Slides Import',
+    title: effectiveTitle,
+    subject: topicContext || 'Google Slides Import',
     description: `Presentation imported from Google Slides (${url}).`,
     slides,
   };
